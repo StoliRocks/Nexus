@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "NexusReasoningAgent"
+version = "1.0.0"
+description = "Reasoning generator for compliance control mapping rationale"
+requires-python = ">=3.9"
+dependencies = [
+    "boto3>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "moto>=4.0",
+    "black",
+    "isort>=5.0",
+    "mypy>=1.0",
+    "flake8>=6.0",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["nexus_reasoning_agent"]
+
+[tool.mypy]
+python_version = "3.9"
+check_untyped_defs = true
+show_error_codes = true
+pretty = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "-v --cov=nexus_reasoning_agent --cov-report=term-missing"

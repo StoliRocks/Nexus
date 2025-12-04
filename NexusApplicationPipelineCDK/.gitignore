@@ -1,0 +1,8 @@
+.DS_Store
+.eslintcache
+/build
+/dist/
+/node_modules
+
+packageInfo
+packageInfo.bak

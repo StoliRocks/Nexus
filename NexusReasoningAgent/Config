@@ -1,0 +1,38 @@
+package.NexusReasoningAgent = {
+    interfaces = (1.0);
+
+    build-system = brazilpython;
+    build-tools = {
+        1.0 = {
+            BrazilPython = 3.0;
+        };
+    };
+
+    dependencies = {
+        1.0 = {
+            # AWS SDK for Bedrock
+            Python-boto3 = 1.x;
+        };
+    };
+
+    test-dependencies = {
+        1.0 = {
+            BrazilPython-Pytest = any;
+            Pytest = 8.x;
+            Python-Pytest-cov = 4.x;
+            Coverage = 7.x;
+            Python-moto = 5.x;
+            BrazilPython-formatters = 1.0;
+            Python-black = no1;
+            Python-isort = 5.x;
+            BrazilPython-mypy = any;
+            Python-mypy = 1.x;
+            BrazilPython-Flake8 = any;
+            Python-flake8 = 7.x;
+        };
+    };
+
+    targets = {
+        python = { type = python; };
+    };
+};

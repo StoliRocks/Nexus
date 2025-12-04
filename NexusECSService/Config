@@ -1,0 +1,39 @@
+# Brazil build configuration for NexusECSService
+package NexusECSService;
+
+# Package metadata
+%package_type = python;
+%version = 1.0;
+
+# Dependencies
+%dependencies = (
+    NexusApplicationCommons,
+);
+
+# Build configuration
+%build_tools = (
+    PythonBuildTool,
+);
+
+# Runtime configuration
+%runtime_dependencies = (
+    python311,
+    boto3,
+    torch,
+    fastapi,
+    uvicorn,
+    pydantic,
+    sentence-transformers,
+    transformers,
+    accelerate,
+    numpy,
+);
+
+# Test configuration
+%test_dependencies = (
+    pytest,
+    pytest-asyncio,
+    pytest-cov,
+    httpx,
+    moto,
+);

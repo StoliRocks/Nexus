@@ -1,0 +1,28 @@
+{
+    "ingestionConfigurationId": "default",
+    "sessionId": "sessionId",
+    "documents": [
+        {
+            "bucket": "my-bucket",
+            "controlId": "control-001",
+            "documentType": "PDF",
+            "documentSize": 1000,
+            "framework": {
+                "name": "NIST",
+                "version": "rev5",
+                "type": "INDUSTRY"
+            }
+        },
+        {
+            "bucket": "my-bucket",
+            "controlId": "control-002",
+            "documentType": "MD",
+            "documentSize": 2000,
+            "framework": {
+                "name": "NIST",
+                "version": "rev3",
+                "type": "INDUSTRY"
+            }
+        }
+    ]
+}

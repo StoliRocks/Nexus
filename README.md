@@ -42,6 +42,8 @@ API Gateway → Lambda Handlers → Step Functions → ECS GPU Service
 | `NexusReasoningAgentLambda` | Reasoning Step Functions task |
 | `NexusJobUpdaterLambda` | Job status updates |
 | `NexusLambdaAuthorizer` | API Gateway custom authorizer |
+| `DefaultAPIEndpointHandlerLambda` | Default/fallback API handler |
+| `design docs/` | Architecture and design documentation |
 
 ## API Endpoints
 

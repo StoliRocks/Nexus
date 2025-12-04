@@ -1,0 +1,18 @@
+archive_system: archive_python
+python_version: Python-default
+handler_path: aws_lambda/handlers.py
+strip_libraries: true
+
+#data_files:
+#  - lib/libxslt.so.1
+#  - lib/libexslt.so.0
+#  - lib/libgcrypt.so.20
+#  - lib/libgpg-error.so.0
+##  - Numpy
+#  - lib/libgfortran.so.4
+#  - lib/libgomp.so.1
+#  - lib/libopenblas.so.0
+#  - lib/libquadmath.so.0
+##  - Matplot
+#  - lib/libpng16.so.16
+#  - lib/libz.so.1

@@ -1,0 +1,17 @@
+# FastAPI and ASGI server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Data validation
+pydantic>=2.5.0
+pydantic-settings>=2.0.0
+
+# AWS SDK
+boto3>=1.28.0
+
+# Strands for multi-agent orchestration
+strands-agents>=0.1.0
+
+# Internal packages (installed via Brazil or local editable)
+# nexus-enrichment-agent
+# nexus-reasoning-agent

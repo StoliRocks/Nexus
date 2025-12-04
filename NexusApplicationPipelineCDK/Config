@@ -1,0 +1,13 @@
+package.NexusApplicationPipelineCDK = {
+    interfaces = (1.0);
+
+    build-system = cdk-build;
+    build-tools = {
+        1.0 = {
+            NodeJS = default;
+            CDKBuild = 4.x;
+            NpmPrettyMuch = 1.1;
+            Python-default-for-BATS-lambda = 1.0;
+        };
+    };
+};

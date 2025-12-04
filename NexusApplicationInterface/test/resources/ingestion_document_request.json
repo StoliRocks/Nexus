@@ -1,0 +1,16 @@
+{
+    "ingestionConfigurationId": "default",
+    "sessionId": "sessionId",
+    "documents": [
+        {
+            "path": "s3://doc1",
+            "documentType": "PDF",
+            "documentSize": 1000
+        },
+        {
+            "path": "s3://doc2",
+            "documentType": "MD",
+            "documentSize": 2000
+        }
+    ]
+}

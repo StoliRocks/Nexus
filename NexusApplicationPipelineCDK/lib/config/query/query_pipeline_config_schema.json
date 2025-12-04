@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "$id$",
+  "description": "Nexus query pipeline configurations.",
+  "type": "object",
+  "default": {},
+  "properties": {
+    "queryPipelineConfigs": {
+      "$id": "ingestionPipelineConfigs",
+      "description": "List of ingestion pipeline configuration for each identifier.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["identifier", "pipelineSteps"],
+        "properties": {
+          "identifier": {
+            "type": "string",
+            "description": "Unique identifier to identify a configuration"
+          },
+          "pipelineSteps": {
+            "type": "array",
+            "description": "Configuration for each pipeline steps in order.",
+            "default": [],
+            "items": {
+              "type": "object",
+              "description": "Polymorphic instance of the pipeline step.",
+              "required": ["stepType"],
+              "properties": {
+                "stepType": {
+                  "type": "string",
+                  "description": "Type of the pipeline step"
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

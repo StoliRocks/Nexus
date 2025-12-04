@@ -1,0 +1,91 @@
+{
+  "queryPipelineConfigs": [
+    {
+      "identifier": "Compliance",
+      "pipelineSteps": [
+        {
+          "stepType": "Explore",
+          "strategyType": "VectorTopK",
+          "parameters": [
+            {
+              "topK": 5
+            }
+          ]
+        },
+        {
+          "stepType": "Explore",
+          "strategyType": "VectorDistance",
+          "parameters": [
+            {
+              "topK": 5
+            }
+          ]
+        },
+        {
+          "stepType": "Reranker",
+          "strategyType": "ClosenessCentrality",
+          "parameters": [
+            {
+              "topK": 5
+            }
+          ]
+        },
+        {
+          "stepType": "Reranker",
+          "strategyType": "PageRank",
+          "parameters": [
+            {
+              "topK": 5
+            }
+          ]
+        },
+        {
+          "stepType": "Reranker",
+          "strategyType": "Degree",
+          "parameters": [
+            {
+              "topK": 5
+            }
+          ]
+        },
+        {
+          "stepType": "Traverse",
+          "strategyType": "BFS",
+          "parameters": []
+        },
+        {
+          "stepType": "Traverse",
+          "strategyType": "BFSParents",
+          "parameters": []
+        },
+        {
+          "stepType": "Traverse",
+          "strategyType": "BFSLevels",
+          "parameters": []
+        },
+        {
+          "stepType": "Traverse",
+          "strategyType": "TopKShortestPath",
+          "parameters": [
+            {
+              "hopCount": 5,
+              "perHopLimit": [-1, -1, -1, -1, -1]
+            }
+          ]
+        },
+        {
+          "stepType": "LLM",
+          "parameters": [
+            {
+              "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+              "temperature": 0.1,
+              "maxRPM": 5,
+              "maxTokens": 4096,
+              "strategy": "self_reflective"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

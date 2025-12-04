@@ -1,0 +1,140 @@
+{
+  "ingestionPipelineConfigs": [
+    {
+      "identifier": "Compliance",
+      "pipelineSteps": [
+        {
+          "stepType": "Loader",
+          "documentPaths": [],
+          "batchSize": 300
+        },
+        {
+          "stepType": "Chunker",
+          "strategyType": "Recursive",
+          "parameters": [
+            {
+              "chunkSize": 1000,
+              "chunkOverlap": 100,
+              "lengthFunction": "token/character",
+              "stripWhitespace": true,
+              "keepSeparator": "False"
+            }
+          ]
+        },
+        {
+          "stepType": "Chunker",
+          "strategyType": "Paragraph",
+          "parameters": [
+            {
+              "chunkSize": 1000,
+              "chunkOverlap": 100,
+              "lengthFunction": "token/character",
+              "stripWhitespace": true,
+              "keepSeparator": "False"
+            }
+          ]
+        },
+        {
+          "stepType": "Chunker",
+          "strategyType": "NLTK",
+          "parameters": []
+        },
+        {
+          "stepType": "Chunker",
+          "strategyType": "Spacy",
+          "parameters": []
+        },
+        {
+          "stepType": "Chunker",
+          "strategyType": "Markdown",
+          "parameters": []
+        },
+        {
+          "stepType": "Chunker",
+          "strategyType": "Semantic",
+          "parameters": [
+            {
+              "embeddingModel": "amazon.titan-embed-text-v1",
+              "regionName": "IAD"
+            }
+          ]
+        },
+        {
+          "stepType": "Extractor",
+          "extractorType": "Agentic",
+          "parameters": [
+            {
+              "modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+              "temperature": "0.1",
+              "maxRPM": [],
+              "embedding": true,
+              "propertiesToEmbed": [],
+              "nodeProperties": [],
+              "batchSize": 10
+            }
+          ]
+        },
+        {
+          "stepType": "Extractor",
+          "extractorType": "Cloudtrail",
+          "parameters": [
+            {
+              "batchSize": 10
+            }
+          ]
+        },
+        {
+          "stepType": "Extractor",
+          "extractorType": "Entity",
+          "parameters": [
+            {
+              "embeddingModel": "anthropic.claude-3-sonnet-20240326-v1:0",
+              "temperature": "0.1"
+            }
+          ]
+        },
+        {
+          "stepType": "Extractor",
+          "extractorType": "GLiner",
+          "parameters": [
+            {
+              "allowedNodes": ["Model", "Industry"],
+              "allowedRelationships": ["HAS_TYPE", "HAS_APPLICATION"],
+              "entityExtractorModel": "anthropic.claude-3-sonnet-20240326-v1:0",
+              "relationshipExtractorModel": "default",
+              "entityConfidenceThreshold": 0.1,
+              "relationshipConfidenceThreshold": 0.1,
+              "batchSize": 10,
+              "embedding": true,
+              "ignoreSelfLoops": true,
+              "device": "cpu"
+            }
+          ]
+        },
+        {
+          "stepType": "Extractor",
+          "extractorType": "Relationship",
+          "parameters": [{}]
+        },
+        {
+          "stepType": "Extractor",
+          "extractorType": "Relic",
+          "parameters": [
+            {
+              "modelSize": "SMALL/MEDIUM/..",
+              "relationshipConfidenceThreshold": 0.1,
+              "ignoreSelfLoops": true,
+              "embedding": true,
+              "batchSize": 10,
+              "device": "gpu"
+            }
+          ]
+        },
+        {
+          "stepType": "Builder",
+          "parameters": []
+        }
+      ]
+    }
+  ]
+}
