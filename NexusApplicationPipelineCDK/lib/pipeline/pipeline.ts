@@ -20,7 +20,6 @@ import { VpcDeploymentStack } from '../stacks/vpc-deployment-stack';
 import { DynamodbStack } from '../stacks/dynamodb/dynamodb-stack';
 import { MappingRequestQueueStack } from '../stacks/sqs/mapping-request-queue-stack';
 import { SERVICE_NAME } from '../utils/constants';
-import { SqsStackProps } from '../props/SqsStackProps';
 import { DashboardStack } from '../stacks/dashboard/dashboard-stack';
 import { ApiEndpointHandlerLambdaStack } from '../stacks/apihandlers/api-endpoint-handler-lambda-stack';
 
@@ -51,7 +50,7 @@ export class PipelineInfrastructure {
         dependencyModel: DependencyModel.BRAZIL,
       },
       versionSetPlatform: VERSION_SET_PLATFORM,
-      trackingVersionSet: 'live', // Or any other version set you prefer
+      trackingVersionSet: 'NexusApplicationPipeline/development', // Using development VS until packages are promoted to live
       bindleGuid: BINDLE_GUID,
       description: DESCRIPTION,
       pipelineId: PIPELINE_ID,
@@ -211,6 +210,7 @@ export class PipelineInfrastructure {
               projectionType: ProjectionType.KEYS_ONLY,
             },
           ],
+          true, // Enable DynamoDB Streams for trigger-based workflows
         );
 
         const controlMappingsTable = this.createDynamoDbStack(
@@ -268,6 +268,7 @@ export class PipelineInfrastructure {
               projectionType: ProjectionType.ALL,
             },
           ],
+          true, // Enable DynamoDB Streams for trigger-based workflows
         );
 
         const controlGuideIndex = this.createDynamoDbStack(
@@ -383,6 +384,45 @@ export class PipelineInfrastructure {
           ],
         );
 
+        // Enrichment table for caching control enrichment results
+        const enrichmentTable = this.createDynamoDbStack(
+          app,
+          deploymentEnvironment,
+          computeEnvironment,
+          pipelineStageConfig.isProd,
+          'Enrichment',
+          'control_id',
+          '', // No sort key - single control_id primary key
+          [],
+          [
+            {
+              indexName: 'FrameworkIndex',
+              partitionKey: {
+                name: 'framework_key',
+                type: dynamodb.AttributeType.STRING,
+              },
+              sortKey: {
+                name: 'created_at',
+                type: dynamodb.AttributeType.STRING,
+              },
+              projectionType: ProjectionType.ALL,
+            },
+          ],
+        );
+
+        // EmbeddingCache table for caching ML embeddings
+        const embeddingCacheTable = this.createDynamoDbStack(
+          app,
+          deploymentEnvironment,
+          computeEnvironment,
+          pipelineStageConfig.isProd,
+          'EmbeddingCache',
+          'control_id',
+          'model_version',
+          [],
+          [],
+        );
+
         const appConfigStack = new AppConfigStack(
           app,
           `AppConfig-${this.generateComputeEnvironmentIdentifier(computeEnvironment)}`,
@@ -424,6 +464,8 @@ export class PipelineInfrastructure {
             mappingReviewsTable,
             mappingFeedbackTable,
             mappingJobsTable,
+            enrichmentTable,
+            embeddingCacheTable,
             dashboardStack,
           ],
         });
@@ -476,6 +518,7 @@ export class PipelineInfrastructure {
    * @param sortKey
    * @param arns
    * @param globalSecondaryIndexes
+   * @param streamEnabled
    * @private
    */
   private createDynamoDbStack(
@@ -488,6 +531,7 @@ export class PipelineInfrastructure {
     sortKey: string,
     arns?: string[],
     globalSecondaryIndexes?: dynamodb.GlobalSecondaryIndexProps[],
+    streamEnabled?: boolean,
   ) {
     return new DynamodbStack(
       app,
@@ -504,6 +548,7 @@ export class PipelineInfrastructure {
         accountId: computeEnvironment.accountId,
         arns: arns,
         globalSecondaryIndexes: globalSecondaryIndexes,
+        streamEnabled: streamEnabled,
       },
     );
   }

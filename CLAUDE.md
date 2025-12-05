@@ -224,6 +224,22 @@ due to bugs requiring code fixes, requests are preserved in DLQ and can be retri
 - `validation_error_response(message, field=None)` - 400 Bad Request
 - `error_response(message, status_code)` - Custom error
 
+## DynamoDB Tables
+
+| Table | Partition Key | Sort Key | GSIs | Streams |
+|-------|---------------|----------|------|---------|
+| `Frameworks` | `frameworkName` | `version` | FrameworkKeyIndex, StatusIndex | No |
+| `FrameworkControls` | `frameworkKey` | `controlKey` | ControlKeyIndex, StatusIndex | Yes |
+| `ControlMappings` | `controlKey` | `mappedControlKey` | MappingKeyIndex, StatusIndex, WorkflowIndex, ControlStatusIndex | Yes |
+| `MappingReviews` | `mappingKey` | `reviewKey` | ReviewerIndex | No |
+| `MappingFeedback` | `mappingKey` | `reviewerId` | UserFeedbackIndex | No |
+| `MappingJobs` | `job_id` | - | StatusIndex, ControlKeyIndex | No |
+| `Enrichment` | `control_id` | - | FrameworkIndex | No |
+| `EmbeddingCache` | `control_id` | `model_version` | - | No |
+| `ControlGuideIndex` | `guideAttribute` | `controlKey` | ControlKeyIndex | No |
+
+**All tables have:** PAY_PER_REQUEST billing, Point-in-Time Recovery, TTL (expiryTime), CloudWatch alarms.
+
 ## Key Patterns
 
 **Database keys:**

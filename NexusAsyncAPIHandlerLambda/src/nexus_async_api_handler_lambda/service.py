@@ -69,7 +69,11 @@ class JobRepository(BaseRepository[Job]):
         target_control_ids: Optional[List[str]] = None,
     ) -> Job:
         """
-        Create a new job record.
+        Create a new job record with idempotent insert.
+
+        Uses conditional expression to prevent duplicate job creation.
+        Since job_id is a UUID, duplicates should never occur, but the
+        condition provides an extra safety layer.
 
         Args:
             control_key: Full source control key
@@ -93,8 +97,12 @@ class JobRepository(BaseRepository[Job]):
             ttl=ttl,
         )
 
-        # Use to_dynamodb_item for correct field naming
-        self.table.put_item(Item=job.to_dynamodb_item())
+        # Use idempotent put to prevent duplicate job creation
+        # Job uses to_dynamodb_item() which outputs snake_case keys
+        self.table.put_item(
+            Item=job.to_dynamodb_item(),
+            ConditionExpression="attribute_not_exists(job_id)",
+        )
         logger.info(f"Created job: {job.job_id}")
 
         return job

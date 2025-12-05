@@ -4,8 +4,12 @@ import { DynamoDBStackProps } from '../../props/DynamoDBStackProps';
 import { RemovalPolicy, Tags } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { ArnPrincipal, Effect, PolicyDocument, PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { DynamoDbMetricAlarms } from '../../alarms/dynamodb-metric-alarms';
 
 export class DynamodbStack extends DeploymentStack {
+  public readonly table: dynamodb.Table;
+  public readonly alarms: DynamoDbMetricAlarms;
+
   constructor(scope: Construct, id: string, props: DynamoDBStackProps) {
     super(scope, id, {
       env: props.env,
@@ -80,12 +84,30 @@ export class DynamodbStack extends DeploymentStack {
       };
     }
 
-    const dynamoDBTable = new dynamodb.Table(this, props.tableName, tableProps);
+    // Add DynamoDB Streams if enabled (for trigger-based workflows)
+    if (props.streamEnabled) {
+      tableProps = {
+        ...tableProps,
+        stream: props.streamViewType || dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+      };
+    }
+
+    this.table = new dynamodb.Table(this, props.tableName, tableProps);
     if (props.globalSecondaryIndexes) {
       props.globalSecondaryIndexes.forEach((globalSecondaryIndex) => {
-        dynamoDBTable.addGlobalSecondaryIndex(globalSecondaryIndex);
+        this.table.addGlobalSecondaryIndex(globalSecondaryIndex);
       });
     }
+
+    // Create CloudWatch alarms for this table
+    this.alarms = new DynamoDbMetricAlarms(
+      this,
+      this.table,
+      props.tableName,
+      props.isProd,
+      props.stage,
+      props.awsRegion,
+    );
   }
 
   /**

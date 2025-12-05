@@ -111,6 +111,38 @@ class BaseRepository(Generic[T]):
             logger.error(f"Error saving item to {self.table_name}: {e}")
             raise
 
+    def put_item_idempotent(self, item: T) -> bool:
+        """
+        Create an item only if it doesn't exist (idempotent create).
+
+        Uses a conditional expression to prevent overwriting existing items.
+        This is useful for critical operations where duplicate prevention is required.
+
+        Args:
+            item: Model instance to save
+
+        Returns:
+            True if item was created, False if item already exists
+
+        Raises:
+            ClientError: For errors other than ConditionalCheckFailedException
+        """
+        try:
+            data = item.model_dump(by_alias=True, exclude_none=True)
+            self.table.put_item(
+                Item=data,
+                ConditionExpression=f"attribute_not_exists({self.partition_key})",
+            )
+            logger.debug(f"Created new item in {self.table_name} (idempotent)")
+            return True
+
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                logger.debug(f"Item already exists in {self.table_name}, skipping create")
+                return False
+            logger.error(f"Error saving item to {self.table_name}: {e}")
+            raise
+
     def delete_item(self, pk_value: str, sk_value: Optional[str] = None) -> None:
         """
         Delete an item by primary key.
