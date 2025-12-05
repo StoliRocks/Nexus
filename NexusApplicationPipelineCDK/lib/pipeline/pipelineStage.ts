@@ -44,7 +44,7 @@ export const PIPELINE_STAGE_CONFIGS: PipelineStageConfig[] = [
   {
     pipelineStageName: 'Prod',
     stage: 'prod',
-    isProd: false,
+    isProd: true,
     computeEnvironments: [
       {
         region: 'NA',

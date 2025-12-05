@@ -1,10 +1,6 @@
-import { HydraBootstrapMode, HydraTestRunResources } from '@amzn/hydra';
 import {
-  BrazilPackage,
   DeploymentEnvironment,
   DeploymentStack,
-  HydraTestApprovalWorkflowStep,
-  Platform,
   SoftwareType,
 } from '@amzn/pipelines';
 import { Construct } from 'constructs';
@@ -36,6 +32,7 @@ import { ControlManagementHandler } from './control-management-handler';
 import { MappingManagementHandler } from './mapping-management-handler';
 import { MappingReviewManagementHandler } from './mapping-review-management-handler';
 import { MappingFeedbackManagementHandler } from './mapping-feedback-management-handler';
+import { AsyncMappingHandler } from './async-mapping-handler';
 
 const NEXUS_CUSTOM_AUTHORIZER_NAME = 'NexusLambdaAuthorizer';
 
@@ -48,6 +45,7 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
   private readonly mappingHandler: MappingManagementHandler;
   private readonly mappingReviewHandler: MappingReviewManagementHandler;
   private readonly mappingFeedbackHandler: MappingFeedbackManagementHandler;
+  private readonly asyncMappingHandler: AsyncMappingHandler;
 
   // Lambda aliases for deployment management
   private readonly frameworkHandlerAlias: Alias;
@@ -55,9 +53,8 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
   private readonly mappingHandlerAlias: Alias;
   private readonly mappingReviewHandlerAlias: Alias;
   private readonly mappingFeedbackHandlerAlias: Alias;
-
-  // Hydra resources for integration tests
-  private readonly hydraResources: HydraTestRunResources;
+  private readonly asyncHandlerAlias: Alias;
+  private readonly statusHandlerAlias: Alias;
 
   // Pipelines will inject a boolean value into a stack parameter that
   // can be examined to determine if a deployment is a rollback. This
@@ -101,6 +98,10 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
     this.mappingHandler = new MappingManagementHandler(this, props);
     this.mappingReviewHandler = new MappingReviewManagementHandler(this, props);
     this.mappingFeedbackHandler = new MappingFeedbackManagementHandler(this, props);
+    this.asyncMappingHandler = new AsyncMappingHandler(this, 'AsyncMappingHandler', {
+      ...props,
+      mappingRequestQueue: props.mappingRequestQueue,
+    });
 
     // Add CloudWatch permissions to all handlers
     this.addCloudWatchPermissions(this.frameworkHandler.frameworkHandler);
@@ -108,6 +109,8 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
     this.addCloudWatchPermissions(this.mappingHandler.mappingHandler);
     this.addCloudWatchPermissions(this.mappingReviewHandler.mappingReviewHandler);
     this.addCloudWatchPermissions(this.mappingFeedbackHandler.mappingFeedbackHandler);
+    this.addCloudWatchPermissions(this.asyncMappingHandler.asyncHandler);
+    this.addCloudWatchPermissions(this.asyncMappingHandler.statusHandler);
 
     // API gateway REST API resource
     this.apiEndpoints = this.setupRESTAPI(props);
@@ -124,6 +127,7 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
     );
     this.mappingReviewHandler.setupMappingReviewAPIResources(mappingIdResource, this.tokenAuthorizer);
     this.mappingFeedbackHandler.setupMappingFeedbackAPIResources(mappingIdResource, this.tokenAuthorizer);
+    this.asyncMappingHandler.setupAsyncMappingAPIResources(mappingsResource, mappingIdResource, this.tokenAuthorizer);
 
     // Grant custom authorizer permission to call API endpoint.
     authorizerFunction.addPermission('ApiGatewayInvokeAuthorizer', {
@@ -138,6 +142,8 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
     this.mappingHandlerAlias = this.createAlias('MappingHandler', this.mappingHandler.mappingHandler);
     this.mappingReviewHandlerAlias = this.createAlias('MappingReviewHandler', this.mappingReviewHandler.mappingReviewHandler);
     this.mappingFeedbackHandlerAlias = this.createAlias('MappingFeedbackHandler', this.mappingFeedbackHandler.mappingFeedbackHandler);
+    this.asyncHandlerAlias = this.createAlias('AsyncHandler', this.asyncMappingHandler.asyncHandler);
+    this.statusHandlerAlias = this.createAlias('StatusHandler', this.asyncMappingHandler.statusHandler);
 
     // Create alarms for API endpoints
     new ApiEndpointAlarms(this, props.env, props.stage, props.awsRegion);
@@ -192,12 +198,34 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
       props.awsRegion,
     );
 
+    // Async handler alarms
+    const asyncAlarms = new LambdaMetricAlarms(
+      this,
+      this.asyncMappingHandler.asyncHandler,
+      this.asyncHandlerAlias,
+      props.isProd,
+      props.stage,
+      props.awsRegion,
+    );
+
+    // Status handler alarms
+    const statusAlarms = new LambdaMetricAlarms(
+      this,
+      this.asyncMappingHandler.statusHandler,
+      this.statusHandlerAlias,
+      props.isProd,
+      props.stage,
+      props.awsRegion,
+    );
+
     // Configure autoscaling for all handlers
     this.configureAutoscaling(this.frameworkHandlerAlias);
     this.configureAutoscaling(this.controlHandlerAlias);
     this.configureAutoscaling(this.mappingHandlerAlias);
     this.configureAutoscaling(this.mappingReviewHandlerAlias);
     this.configureAutoscaling(this.mappingFeedbackHandlerAlias);
+    this.configureAutoscaling(this.asyncHandlerAlias);
+    this.configureAutoscaling(this.statusHandlerAlias);
 
     // Gradual deployment only for prod stage. For other stages, deployment will be one-shot.
     if (props.isProd) {
@@ -206,10 +234,10 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
       this.createDeploymentGroup('MappingHandler', this.mappingHandlerAlias, [...mappingAlarms.getSev2Alarms()], props.isProd);
       this.createDeploymentGroup('MappingReviewHandler', this.mappingReviewHandlerAlias, [...mappingReviewAlarms.getSev2Alarms()], props.isProd);
       this.createDeploymentGroup('MappingFeedbackHandler', this.mappingFeedbackHandlerAlias, [...mappingFeedbackAlarms.getSev2Alarms()], props.isProd);
+      this.createDeploymentGroup('AsyncHandler', this.asyncHandlerAlias, [...asyncAlarms.getSev2Alarms()], props.isProd);
+      this.createDeploymentGroup('StatusHandler', this.statusHandlerAlias, [...statusAlarms.getSev2Alarms()], props.isProd);
     }
 
-    // Configure hydra to run integration tests.
-    this.hydraResources = this.configureHydra(props.env);
   }
 
   /**
@@ -226,31 +254,6 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
         resources: ['*'],
       }),
     );
-  }
-
-  /**
-   * Configure hydra to run integration tests for the lambda.
-   *
-   * @private
-   * @param env
-   */
-  private configureHydra(env: DeploymentEnvironment) {
-    const hydraResources = new HydraTestRunResources(this, 'HydraTestRunResources', {
-      hydraEnvironment: env.hydraEnvironment,
-      bootstrapMode: HydraBootstrapMode.AUTO,
-      hydraAsset: {
-        targetPackage: BrazilPackage.fromString('NexusAPIEndpointHandlerLambdaTests-1.0'),
-      },
-    });
-
-    // Grant invoke permissions to all handlers for integration tests
-    this.frameworkHandler.frameworkHandler.grantInvoke(hydraResources.invocationRole);
-    this.controlHandler.controlHandler.grantInvoke(hydraResources.invocationRole);
-    this.mappingHandler.mappingHandler.grantInvoke(hydraResources.invocationRole);
-    this.mappingReviewHandler.mappingReviewHandler.grantInvoke(hydraResources.invocationRole);
-    this.mappingFeedbackHandler.mappingFeedbackHandler.grantInvoke(hydraResources.invocationRole);
-
-    return hydraResources;
   }
 
   /**
@@ -411,32 +414,5 @@ export class ApiEndpointHandlerLambdaStack extends DeploymentStack {
         deploymentConfiguration.deploymentConfigArn,
       ),
     };
-  }
-
-  createIntegrationTestsApprovalWorkflowStep(
-    name: string,
-    versionSetPlatform: Platform,
-  ): HydraTestApprovalWorkflowStep {
-    return this.hydraResources.createApprovalWorkflowStep({
-      name,
-      // Hydra Test Run Definition, which defines parameters to run the test step.
-      // See: https://w.amazon.com/bin/view/HydraTestPlatform/RunDefinition/
-      runDefinition: {
-        SchemaVersion: '1.0',
-        SchemaType: 'HydraCustom',
-        HydraParameters: {
-          Runtime: DEFAULT_BRAZIL_PYTHON_RUNTIME.name,
-          Handler: 'handlers.handler',
-          ComputeEngine: 'Lambda',
-        },
-        HandlerParameters: {
-          PythonTestPackage: 'nexus_api_endpoint_handler_lambda_tests',
-        },
-        EnvironmentVariables: {
-          Stage: this.stage,
-        },
-      },
-      versionSetPlatform,
-    });
   }
 }

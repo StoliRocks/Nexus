@@ -11,19 +11,22 @@ This document describes the complete flow of the Mapping API through each packag
 3. [API Endpoints Summary](#api-endpoints-summary)
 4. [Package Details](#package-details)
    - [NexusAsyncAPIHandlerLambda](#1-nexusasyncapihandlerlambda)
-   - [NexusStatusAPIHandlerLambda](#2-nexusstatusapihandlerlambda)
-   - [NexusScienceOrchestratorLambda](#3-nexusscienceorchestratorlambda)
-   - [NexusECSService](#4-nexusecsservice)
-   - [NexusEnrichmentAgentLambda](#5-nexusenrichmentagentlambda)
-   - [NexusStrandsAgentService](#6-nexusstrandsagentservice)
-   - [NexusReasoningAgentLambda](#7-nexusreasoningagentlambda)
-   - [NexusJobUpdaterLambda](#8-nexusjobupdaterlambda)
-   - [NexusMappingAPIHandlerLambda](#9-nexusmappingapihandlerlambda)
-   - [NexusApplicationInterface](#10-nexusapplicationinterface)
-   - [NexusApplicationCommons](#11-nexusapplicationcommons)
+   - [NexusSqsTriggerLambda](#2-nexussqstriggerlambda)
+   - [NexusDlqRedriveLambda](#3-nexusdlqredrivelambda)
+   - [NexusStatusAPIHandlerLambda](#4-nexusstatusapihandlerlambda)
+   - [NexusScienceOrchestratorLambda](#5-nexusscienceorchestratorlambda)
+   - [NexusECSService](#6-nexusecsservice)
+   - [NexusEnrichmentAgentLambda](#7-nexusenrichmentagentlambda)
+   - [NexusStrandsAgentService](#8-nexusstrandsagentservice)
+   - [NexusReasoningAgentLambda](#9-nexusreasoningagentlambda)
+   - [NexusJobUpdaterLambda](#10-nexusjobupdaterlambda)
+   - [NexusMappingAPIHandlerLambda](#11-nexusmappingapihandlerlambda)
+   - [NexusApplicationInterface](#12-nexusapplicationinterface)
+   - [NexusApplicationCommons](#13-nexusapplicationcommons)
 5. [Complete Request Flow](#complete-request-flow)
 6. [Database Schema](#database-schema)
-7. [Environment Variables](#environment-variables)
+7. [SQS Infrastructure](#sqs-infrastructure)
+8. [Environment Variables](#environment-variables)
 
 ---
 
@@ -68,12 +71,36 @@ The Nexus Mapping API enables semantic mapping between AWS service controls and 
 │                   NexusAsyncAPIHandlerLambda                                 │
 │   • Validate request format                                                  │
 │   • Verify control/framework exist                                          │
-│   • Create job record (PENDING)                                             │
-│   • Start Step Functions workflow                                           │
+│   • Create job record (PENDING) using Job DAO                               │
+│   • Publish to MappingRequestQueue (SQS)                                    │
 │   • Return 202 Accepted                                                     │
 └───────────────────────────────┬─────────────────────────────────────────────┘
                                 │
                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      SQS DURABILITY LAYER                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌────────────────────┐     ┌─────────────────────┐     ┌────────────────┐  │
+│  │ MappingRequest     │     │ MappingRequest      │     │ NexusDlqRedrive│  │
+│  │      Queue         │────▶│       DLQ           │────▶│     Lambda     │  │
+│  │ (7-day retention)  │     │ (14-day retention)  │     │ (manual retry) │  │
+│  └─────────┬──────────┘     │  (after 3 failures) │     └────────┬───────┘  │
+│            │                 └─────────────────────┘              │          │
+│            │                                                      │          │
+│            │◀─────────────────────────────────────────────────────┘          │
+│            │                  (after bug fix deployed)                       │
+│            ▼                                                                 │
+│  ┌────────────────────┐                                                     │
+│  │ NexusSqsTrigger    │                                                     │
+│  │     Lambda         │                                                     │
+│  │ • Start Step Fns   │                                                     │
+│  │ • Update job→RUNNING│                                                    │
+│  └─────────┬──────────┘                                                     │
+│            │                                                                 │
+└────────────┼─────────────────────────────────────────────────────────────────┘
+             │
+             ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                      STEP FUNCTIONS WORKFLOW                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -182,7 +209,7 @@ The Nexus Mapping API enables semantic mapping between AWS service controls and 
 
 **Location:** `NexusAsyncAPIHandlerLambda/`
 
-**Purpose:** Entry point for async mapping requests. Validates input, creates job record, and initiates Step Functions workflow.
+**Purpose:** Entry point for async mapping requests. Validates input, creates job record, and publishes to SQS for durable processing.
 
 **Request Format:**
 ```json
@@ -212,8 +239,9 @@ The Nexus Mapping API enables semantic mapping between AWS service controls and 
 | `validate_framework_key_format()` | Validates pattern: `^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+$` |
 | `control_exists()` | Queries ControlKeyIndex GSI; returns suggestions if not found |
 | `framework_exists()` | Queries Frameworks table; returns available frameworks if not found |
-| `create_job()` | Creates job record with PENDING status and 7-day TTL |
-| `start_workflow()` | Starts Step Functions execution, updates status to RUNNING |
+| `create_job()` | Creates job record using Job DAO with PENDING status and 7-day TTL |
+| `enqueue_mapping_request()` | Publishes to MappingRequestQueue for durable processing |
+| `start_workflow()` | Alias for enqueue_mapping_request (backward compatibility) |
 
 **Service Class:**
 ```python
@@ -221,16 +249,100 @@ class AsyncMappingService:
     def __init__(
         self,
         dynamodb_resource: Optional[Any] = None,
-        job_table_name: Optional[str] = None,
-        sfn_client: Optional[Any] = None,
-        state_machine_arn: Optional[str] = None,
+        sqs_client: Optional[Any] = None,
+        job_repository: Optional[JobRepository] = None,
+        queue_url: Optional[str] = None,
     ):
         ...
 ```
 
+**Dependencies:**
+- `NexusApplicationInterface` - Job model, JobStatus enum
+- `NexusApplicationCommons` - BaseRepository pattern
+
 ---
 
-### 2. NexusStatusAPIHandlerLambda
+### 2. NexusSqsTriggerLambda
+
+**Location:** `NexusSqsTriggerLambda/`
+
+**Purpose:** SQS event consumer that starts Step Functions workflows. Provides durability - if Step Functions fails due to bugs requiring code fixes, requests are preserved in DLQ.
+
+**SQS Event Input:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "control_key": "AWS.ControlCatalog#1.0#API_GW_CACHE_ENABLED",
+  "target_framework_key": "NIST-SP-800-53#R5",
+  "target_control_ids": ["AC-1", "AC-2"]
+}
+```
+
+**Key Functions:**
+
+| Function | Description |
+|----------|-------------|
+| `start_workflow()` | Starts Step Functions execution for each SQS message |
+| `JobRepository.update_status()` | Updates job status to IN_PROGRESS |
+
+**SQS Configuration:**
+- Event source: MappingRequestQueue
+- Batch size: 1 (process one message at a time)
+- Partial batch failure reporting: Enabled
+- Max receive count: 3 (then moves to DLQ)
+
+**Failure Handling:**
+- If `start_execution` fails, message becomes visible again after visibility timeout
+- After 3 failures, message moves to MappingRequestDLQ
+- Messages preserved in DLQ for 14 days for retry after bug fixes
+
+---
+
+### 3. NexusDlqRedriveLambda
+
+**Location:** `NexusDlqRedriveLambda/`
+
+**Purpose:** Redrives failed messages from MappingRequestDLQ back to MappingRequestQueue after bug fixes are deployed.
+
+**Invocation:** Manual or scheduled (not automatically triggered)
+
+**Request Format:**
+```json
+{
+  "dry_run": true,        // Optional: just count messages without redriving
+  "max_messages": 50      // Optional: limit messages to redrive
+}
+```
+
+**Response:**
+```json
+{
+  "statusCode": 200,
+  "messages_redriven": 25,
+  "dlq_message_count_before": 30,
+  "message": "Successfully redriven 25 messages"
+}
+```
+
+**Dry Run Response:**
+```json
+{
+  "statusCode": 200,
+  "dry_run": true,
+  "dlq_message_count": 30,
+  "message": "DLQ contains 30 messages ready for redrive"
+}
+```
+
+**Workflow:**
+1. Get approximate message count from DLQ
+2. Receive messages from DLQ (up to max_messages)
+3. For each message: send to main queue, then delete from DLQ
+4. Return count of successfully redriven messages
+
+---
+
+### 4. NexusStatusAPIHandlerLambda
 
 **Location:** `NexusStatusAPIHandlerLambda/`
 
@@ -1008,12 +1120,73 @@ def error_response(message: str, status_code: int = 400, error_code: str = None)
 
 ---
 
+## SQS Infrastructure
+
+### MappingRequestQueue
+
+**Type:** Standard SQS Queue
+
+**Purpose:** Durable buffer for async mapping requests. Provides durability - requests are preserved even if Step Functions fails.
+
+| Property | Value | Description |
+|----------|-------|-------------|
+| Visibility Timeout | 60 seconds | Time for SQS Trigger Lambda to process |
+| Message Retention | 7 days | How long messages are kept |
+| Max Receive Count | 3 | Retries before moving to DLQ |
+| Delivery Delay | 0 | No delay |
+| Encryption | AWS managed | Server-side encryption |
+
+### MappingRequestDLQ
+
+**Type:** Standard SQS Queue (Dead Letter Queue)
+
+**Purpose:** Stores failed messages for retry after bug fixes are deployed.
+
+| Property | Value | Description |
+|----------|-------|-------------|
+| Message Retention | 14 days | Extended retention for manual retry |
+| Encryption | AWS managed | Server-side encryption |
+
+### CloudWatch Alarms
+
+| Alarm | Condition | Action |
+|-------|-----------|--------|
+| DLQ Not Empty | ApproximateNumberOfMessages > 0 | Alert on failures |
+| Queue Backlog | ApproximateNumberOfMessages > 100 | Alert on processing delays |
+| Message Age | ApproximateAgeOfOldestMessage > 3600s | Alert on stuck messages |
+
+### Message Flow
+
+```
+AsyncAPIHandler                    MappingRequestQueue           SqsTriggerLambda
+     │                                    │                            │
+     │ ──── publish message ────────────▶ │                            │
+     │                                    │ ◀──── receive (batch=1) ─── │
+     │                                    │                            │
+     │                                    │     ┌── success ──▶ delete message
+     │                                    │     │
+     │                                    │     └── failure ──▶ retry (up to 3x)
+     │                                    │                            │
+     │                                    │                            ▼
+     │                                    │              MappingRequestDLQ
+     │                                    │              (after 3 failures)
+     │                                    │                            │
+     │                                    │           ┌────────────────┘
+     │                                    │           │ DlqRedriveLambda
+     │                                    │ ◀─────────┘ (manual, after fix)
+```
+
+---
+
 ## Environment Variables
 
 | Variable | Packages | Default | Description |
 |----------|----------|---------|-------------|
-| JOB_TABLE_NAME | Async, Status, Updater | MappingJobs | Jobs table name |
-| STATE_MACHINE_ARN | Async | Required | Step Functions ARN |
+| JOB_TABLE_NAME | Async, SqsTrigger, Status, Updater | MappingJobs | Jobs table name |
+| MAPPING_REQUEST_QUEUE_URL | Async | Required | SQS queue URL for durable processing |
+| STATE_MACHINE_ARN | SqsTrigger | Required | Step Functions ARN |
+| DLQ_URL | DlqRedrive | Required | Dead letter queue URL |
+| MAIN_QUEUE_URL | DlqRedrive | Required | Main queue URL for redrive |
 | FRAMEWORKS_TABLE_NAME | Async, Science | Frameworks | Frameworks table |
 | CONTROLS_TABLE_NAME | Async, Science | FrameworkControls | Controls table |
 | ENRICHMENT_TABLE_NAME | Enrichment, Science | Enrichment | Enrichment cache |

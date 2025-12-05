@@ -72,34 +72,44 @@ Nexus is an AWS compliance control mapping system that automatically maps AWS se
                           └───────────────┘
 ```
 
-### 2.2 Async Mapping Pipeline
+### 2.2 Async Mapping Pipeline (with SQS Durability)
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────────────────────────────┐
-│ POST        │     │ Async API   │     │         Step Functions              │
-│ /mappings   │────▶│   Lambda    │────▶│                                     │
-└─────────────┘     └─────────────┘     │  ┌─────────────────────────────┐   │
-                                        │  │ 1. ValidateControl          │   │
-┌─────────────┐                         │  │ 2. CheckEnrichment          │   │
-│ GET         │     ┌─────────────┐     │  │ 3. [RunEnrichment]          │   │
-│ /mappings/  │────▶│ Status API  │     │  │ 4. ScienceOrchestrator      │   │
-│ {id}        │     │   Lambda    │     │  │ 5. Map(ReasoningAgent)      │   │
-└─────────────┘     └─────────────┘     │  │ 6. JobUpdater               │   │
-                                        │  └─────────────────────────────┘   │
-                                        └─────────────────────────────────────┘
-                                                        │
-                    ┌───────────────────────────────────┼───────────────────┐
-                    │                                   │                   │
-                    ▼                                   ▼                   ▼
-          ┌─────────────────┐              ┌─────────────────┐   ┌─────────────────┐
-          │ NexusECSService │              │ NexusStrands    │   │    DynamoDB     │
-          │ (GPU ML Models) │              │ AgentService    │   │     Tables      │
-          │                 │              │ (Claude Agents) │   │                 │
-          │ • Qwen Embed    │              │                 │   │ • Jobs          │
-          │ • ModernBERT    │              │ • Enrichment    │   │ • Mappings      │
-          │   Reranker      │              │ • Reasoning     │   │ • Controls      │
-          └─────────────────┘              └─────────────────┘   └─────────────────┘
+┌─────────────┐     ┌─────────────┐     ┌───────────────┐     ┌─────────────┐
+│ POST        │     │ Async API   │     │ Mapping       │     │ SQS Trigger │
+│ /mappings   │────▶│   Lambda    │────▶│ Request Queue │────▶│   Lambda    │
+└─────────────┘     └─────────────┘     └───────────────┘     └─────────────┘
+                           │                    │                     │
+                           ▼                    ▼ (on failure)        ▼
+                    ┌─────────────┐     ┌───────────────┐   ┌─────────────────────────────┐
+                    │ MappingJobs │     │ Mapping       │   │      Step Functions         │
+                    │  (PENDING)  │     │ Request DLQ   │   │                             │
+                    └─────────────┘     └───────────────┘   │ 1. ValidateControl          │
+                                               │            │ 2. CheckEnrichment          │
+┌─────────────┐     ┌─────────────┐            ▼            │ 3. [RunEnrichment]          │
+│ GET         │     │ Status API  │     ┌─────────────┐    │ 4. ScienceOrchestrator      │
+│ /mappings/  │────▶│   Lambda    │     │ DLQ Redrive │    │ 5. Map(ReasoningAgent)      │
+│ {id}        │     │             │     │   Lambda    │    │ 6. JobUpdater               │
+└─────────────┘     └─────────────┘     └─────────────┘    └─────────────────────────────┘
+                                               │                         │
+                                               └──────▶ (after fix) ─────┘
+                                                                         │
+                    ┌────────────────────────────────────────────────────┼───────────────────┐
+                    │                                                    │                   │
+                    ▼                                                    ▼                   ▼
+          ┌─────────────────┐                               ┌─────────────────┐   ┌─────────────────┐
+          │ NexusECSService │                               │ NexusStrands    │   │    DynamoDB     │
+          │ (GPU ML Models) │                               │ AgentService    │   │     Tables      │
+          │                 │                               │ (Claude Agents) │   │                 │
+          │ • Qwen Embed    │                               │                 │   │ • Jobs          │
+          │ • ModernBERT    │                               │ • Enrichment    │   │ • Mappings      │
+          │   Reranker      │                               │ • Reasoning     │   │ • Controls      │
+          └─────────────────┘                               └─────────────────┘   └─────────────────┘
 ```
+
+**SQS Durability Layer:** Requests are queued before Step Functions execution. If processing fails
+due to bugs requiring code fixes, requests are preserved in DLQ (14-day retention) and can be
+retried using NexusDlqRedriveLambda after the fix is deployed.
 
 ---
 
@@ -129,8 +139,10 @@ Nexus is an AWS compliance control mapping system that automatically maps AWS se
 
 | Package | Step | Description |
 |---------|------|-------------|
-| **NexusAsyncAPIHandlerLambda** | Entry Point | Creates job, starts Step Functions workflow |
+| **NexusAsyncAPIHandlerLambda** | Entry Point | Creates job, publishes to SQS for durable processing |
 | **NexusStatusAPIHandlerLambda** | Query | Returns job status and results |
+| **NexusSqsTriggerLambda** | SQS Consumer | Consumes SQS queue, starts Step Functions workflow |
+| **NexusDlqRedriveLambda** | Utility | Redrives failed messages from DLQ after bug fixes |
 | **NexusScienceOrchestratorLambda** | ML Pipeline | Orchestrates embed → retrieve → rerank |
 | **NexusEnrichmentAgentLambda** | Enrichment | Calls NexusStrandsAgentService /enrich |
 | **NexusReasoningAgentLambda** | Reasoning | Calls NexusStrandsAgentService /reason |
@@ -164,11 +176,17 @@ Nexus is an AWS compliance control mapping system that automatically maps AWS se
    - Validates framework_key format (`frameworkName#version`)
    - Verifies control exists in Controls table
    - Verifies target framework exists in Frameworks table
-   - Creates job record in Jobs table (status: PENDING)
-   - Starts Step Functions execution
+   - Creates job record in Jobs table (status: PENDING) using Job DAO
+   - Publishes request to MappingRequestQueue (SQS)
    - Returns 202 Accepted with `mappingId`
 
-3. **Step Functions Workflow**
+3. **NexusSqsTriggerLambda**
+   - Triggered by SQS event from MappingRequestQueue
+   - Starts Step Functions execution with job details
+   - Updates job status to IN_PROGRESS
+   - On failure: message automatically retried (max 3 times) then sent to DLQ
+
+4. **Step Functions Workflow**
 
    a. **ValidateControl** (NexusScienceOrchestratorLambda)
       - Verifies source control exists
@@ -318,11 +336,32 @@ class SomeService:
 | Frameworks | frameworkName | version | Framework metadata |
 | Controls | frameworkKey | controlKey | Control definitions |
 | Mappings | mappingKey | - | Control-to-control mappings |
-| Jobs | job_id | - | Async mapping job status |
+| MappingJobs | job_id | - | Async mapping job status |
 | Enrichment | control_id | - | Cached enriched control text |
 | EmbeddingCache | control_id | model_version | Cached embeddings |
 | Reviews | mappingId | reviewId | Mapping reviews |
 | Feedbacks | mappingId | feedbackId | Mapping feedback |
+
+---
+
+## 7.5 SQS Queues
+
+| Queue | Type | Purpose | Retention |
+|-------|------|---------|-----------|
+| MappingRequestQueue | Standard | Durable buffer for async mapping requests | 7 days |
+| MappingRequestDLQ | Standard (DLQ) | Failed messages for retry after bug fixes | 14 days |
+
+### SQS Configuration
+
+**MappingRequestQueue:**
+- Visibility Timeout: 60 seconds
+- Max Receive Count: 3 (then moves to DLQ)
+- Encryption: AWS managed
+
+**CloudWatch Alarms:**
+- DLQ Not Empty: Alert when messages appear in DLQ
+- Queue Backlog: Alert when pending messages > 100
+- Message Age: Alert when oldest message > 1 hour
 
 ---
 
@@ -340,8 +379,11 @@ class SomeService:
 
 | Variable | Lambda | Description |
 |----------|--------|-------------|
-| `JOB_TABLE_NAME` | Async, Status, JobUpdater | Jobs table |
-| `STATE_MACHINE_ARN` | Async | Step Functions ARN |
+| `JOB_TABLE_NAME` | Async, Status, SqsTrigger, JobUpdater | Jobs table |
+| `MAPPING_REQUEST_QUEUE_URL` | Async | SQS queue URL for durable processing |
+| `STATE_MACHINE_ARN` | SqsTrigger | Step Functions ARN |
+| `DLQ_URL` | DlqRedrive | Dead letter queue URL |
+| `MAIN_QUEUE_URL` | DlqRedrive | Main queue URL for redrive |
 | `SCIENCE_API_ENDPOINT` | ScienceOrchestrator | NexusECSService URL |
 | `STRANDS_SERVICE_ENDPOINT` | Enrichment, Reasoning | NexusStrandsAgentService URL |
 | `ENRICHMENT_TABLE_NAME` | ScienceOrchestrator, Enrichment | Enrichment cache table |
@@ -471,17 +513,23 @@ NewControlTrigger → SQS → MapControlFanout → SQS → MapControlBatchProces
 
 **Current Implementation:**
 ```
-POST /mappings → AsyncAPIHandler → Step Functions → ScienceOrchestrator → ECS ML Service
+POST /mappings → AsyncAPIHandler → SQS Queue → SQS Trigger → Step Functions → ECS ML Service
+                                      ↓ (on failure)
+                                    DLQ → DLQ Redrive → SQS Queue
 ```
 
-**Rationale:** The HLD describes an event-driven architecture with DynamoDB Streams triggering Lambda functions through SQS queues. The implementation uses a request-driven approach with Step Functions for several reasons:
+**Rationale:** The implementation combines SQS durability with Step Functions orchestration:
 
-1. **Simpler orchestration** - Step Functions provides built-in state management, retries, and error handling
-2. **Better visibility** - Step Functions console shows workflow execution status
-3. **Easier debugging** - Each step's input/output is captured for troubleshooting
-4. **On-demand mapping** - Current use case is request-driven rather than event-driven
+1. **SQS durability** - Requests are queued before Step Functions, ensuring no request loss during failures
+2. **DLQ retry** - Failed requests (due to bugs) are preserved in DLQ and can be retried after code fixes
+3. **Simpler orchestration** - Step Functions provides built-in state management, retries, and error handling
+4. **Better visibility** - Step Functions console shows workflow execution status
+5. **Easier debugging** - Each step's input/output is captured for troubleshooting
+6. **On-demand mapping** - Current use case is request-driven rather than event-driven
 
-**Future consideration:** If automatic mapping on control INSERT is required, DynamoDB Streams can trigger the existing Step Functions workflow.
+**Alignment with HLD Section 6.1.1:** The implementation follows the HLD recommendation for hybrid Step Functions + SQS architecture, where SQS provides durability and Step Functions provides orchestration.
+
+**Future consideration:** If automatic mapping on control INSERT is required, DynamoDB Streams can trigger the existing Step Functions workflow via SQS.
 
 #### 12.3.2 Science Model Invocation
 

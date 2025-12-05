@@ -3,6 +3,9 @@
 Supports Nexus Database Schema:
 - control_key: Full control key (frameworkKey#controlId)
 - target_framework_key: Full target framework key (frameworkName#version)
+
+Publishes mapping requests to SQS for durable processing.
+Uses DAOs from NexusApplicationInterface and patterns from NexusApplicationCommons.
 """
 
 import json
@@ -16,10 +19,14 @@ from typing import Any, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from nexus_application_interface.api.v1 import Job
+from nexus_application_interface.api.v1.models.enums import JobStatus
+from nexus_application_commons.dynamodb.base_repository import BaseRepository
+
 logger = logging.getLogger(__name__)
 
 JOB_TABLE_NAME = os.environ.get("JOB_TABLE_NAME", "MappingJobs")
-STATE_MACHINE_ARN = os.environ.get("STATE_MACHINE_ARN", "")
+MAPPING_REQUEST_QUEUE_URL = os.environ.get("MAPPING_REQUEST_QUEUE_URL", "")
 FRAMEWORKS_TABLE_NAME = os.environ.get("FRAMEWORKS_TABLE_NAME", "Frameworks")
 CONTROLS_TABLE_NAME = os.environ.get("CONTROLS_TABLE_NAME", "FrameworkControls")
 JOB_TTL_DAYS = 7
@@ -32,37 +39,97 @@ CONTROL_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+#.+$")
 FRAMEWORK_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+$")
 
 
+class JobRepository(BaseRepository[Job]):
+    """Repository for Job operations in the MappingJobs table."""
+
+    def __init__(
+        self,
+        table_name: Optional[str] = None,
+        dynamodb_resource: Optional[Any] = None,
+    ):
+        """
+        Initialize the job repository.
+
+        Args:
+            table_name: Optional table name override
+            dynamodb_resource: Optional DynamoDB resource for testing
+        """
+        super().__init__(
+            table_name=table_name or JOB_TABLE_NAME,
+            model_class=Job,
+            partition_key="job_id",
+            sort_key=None,
+            dynamodb_resource=dynamodb_resource,
+        )
+
+    def create_job(
+        self,
+        control_key: str,
+        target_framework_key: str,
+        target_control_ids: Optional[List[str]] = None,
+    ) -> Job:
+        """
+        Create a new job record.
+
+        Args:
+            control_key: Full source control key
+            target_framework_key: Target framework key
+            target_control_ids: Optional list of specific target control IDs
+
+        Returns:
+            Created Job instance
+        """
+        now = datetime.utcnow()
+        ttl = int((now + timedelta(days=JOB_TTL_DAYS)).timestamp())
+
+        job = Job(
+            jobId=str(uuid.uuid4()),
+            status=JobStatus.PENDING,
+            controlKey=control_key,
+            targetFrameworkKey=target_framework_key,
+            createdAt=now.isoformat(),
+            updatedAt=now.isoformat(),
+            targetControlIds=target_control_ids,
+            ttl=ttl,
+        )
+
+        # Use to_dynamodb_item for correct field naming
+        self.table.put_item(Item=job.to_dynamodb_item())
+        logger.info(f"Created job: {job.job_id}")
+
+        return job
+
+
 class AsyncMappingService:
     """Service class for async mapping job operations."""
 
     def __init__(
         self,
         dynamodb_resource: Optional[Any] = None,
-        sfn_client: Optional[Any] = None,
-        job_table_name: Optional[str] = None,
+        sqs_client: Optional[Any] = None,
+        job_repository: Optional[JobRepository] = None,
         frameworks_table_name: Optional[str] = None,
         controls_table_name: Optional[str] = None,
-        state_machine_arn: Optional[str] = None,
+        queue_url: Optional[str] = None,
     ):
         """
         Initialize the async mapping service.
 
         Args:
             dynamodb_resource: Optional DynamoDB resource (for testing)
-            sfn_client: Optional Step Functions client (for testing)
-            job_table_name: Optional job table name override
+            sqs_client: Optional SQS client (for testing)
+            job_repository: Optional JobRepository (for testing)
             frameworks_table_name: Optional frameworks table name override
             controls_table_name: Optional controls table name override
-            state_machine_arn: Optional state machine ARN override
+            queue_url: Optional SQS queue URL override
         """
         self.dynamodb = dynamodb_resource or boto3.resource("dynamodb")
-        self.sfn = sfn_client or boto3.client("stepfunctions")
-        self.job_table_name = job_table_name or JOB_TABLE_NAME
+        self.sqs = sqs_client or boto3.client("sqs")
+        self.job_repo = job_repository or JobRepository(dynamodb_resource=self.dynamodb)
         self.frameworks_table_name = frameworks_table_name or FRAMEWORKS_TABLE_NAME
         self.controls_table_name = controls_table_name or CONTROLS_TABLE_NAME
-        self.state_machine_arn = state_machine_arn or STATE_MACHINE_ARN
+        self.queue_url = queue_url or MAPPING_REQUEST_QUEUE_URL
 
-        self.job_table = self.dynamodb.Table(self.job_table_name)
         self.frameworks_table = self.dynamodb.Table(self.frameworks_table_name)
         self.controls_table = self.dynamodb.Table(self.controls_table_name)
 
@@ -74,10 +141,10 @@ class AsyncMappingService:
         self,
         control_key: str,
         target_framework_key: str,
-        target_control_ids: Optional[List[str]],
+        target_control_ids: Optional[List[str]] = None,
     ) -> str:
         """
-        Create job record in DynamoDB.
+        Create job record in DynamoDB using Job DAO.
 
         Args:
             control_key: Full source control key (e.g., "AWS.EC2#1.0#PR.1").
@@ -87,35 +154,26 @@ class AsyncMappingService:
         Returns:
             Generated job_id (UUID).
         """
-        job_id = str(uuid.uuid4())
-        now = datetime.utcnow()
-        ttl = int((now + timedelta(days=JOB_TTL_DAYS)).timestamp())
+        job = self.job_repo.create_job(
+            control_key=control_key,
+            target_framework_key=target_framework_key,
+            target_control_ids=target_control_ids,
+        )
+        return job.job_id
 
-        item = {
-            "job_id": job_id,
-            "status": "PENDING",
-            "control_key": control_key,
-            "target_framework_key": target_framework_key,
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-            "ttl": ttl,
-        }
-
-        if target_control_ids:
-            item["target_control_ids"] = target_control_ids
-
-        self.job_table.put_item(Item=item)
-        return job_id
-
-    def start_workflow(
+    def enqueue_mapping_request(
         self,
         job_id: str,
         control_key: str,
         target_framework_key: str,
-        target_control_ids: Optional[List[str]],
-    ) -> None:
+        target_control_ids: Optional[List[str]] = None,
+    ) -> str:
         """
-        Start Step Functions workflow and update job status to RUNNING.
+        Enqueue mapping request to SQS for durable processing.
+
+        The SQS Trigger Lambda will consume this message and start Step Functions.
+        This provides durability - if Step Functions fails due to a bug requiring
+        a code fix, the request is preserved in DLQ and can be retried after fix.
 
         Args:
             job_id: Job identifier.
@@ -123,29 +181,55 @@ class AsyncMappingService:
             target_framework_key: Target framework key.
             target_control_ids: Optional list of specific target control IDs.
 
+        Returns:
+            SQS message ID.
+
         Raises:
-            botocore.exceptions.ClientError: Step Functions start_execution fails.
+            botocore.exceptions.ClientError: SQS send_message fails.
+            ValueError: If queue URL is not configured.
         """
-        sfn_input = {
+        if not self.queue_url:
+            raise ValueError("MAPPING_REQUEST_QUEUE_URL environment variable is not set")
+
+        message_body = {
             "job_id": job_id,
             "control_key": control_key,
             "target_framework_key": target_framework_key,
             "target_control_ids": target_control_ids,
         }
-        self.sfn.start_execution(
-            stateMachineArn=self.state_machine_arn,
-            name=job_id,
-            input=json.dumps(sfn_input),
-        )
 
-        self.job_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #status = :status, updated_at = :updated_at",
-            ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={
-                ":status": "RUNNING",
-                ":updated_at": datetime.utcnow().isoformat(),
-            },
+        # Handle FIFO vs standard queue
+        send_params = {
+            "QueueUrl": self.queue_url,
+            "MessageBody": json.dumps(message_body),
+        }
+
+        if self.queue_url.endswith(".fifo"):
+            send_params["MessageGroupId"] = control_key
+            send_params["MessageDeduplicationId"] = job_id
+
+        response = self.sqs.send_message(**send_params)
+        message_id = response.get("MessageId", "")
+        logger.info(f"Enqueued mapping request: job_id={job_id}, message_id={message_id}")
+
+        return message_id
+
+    # Keep old method name as alias for backward compatibility
+    def start_workflow(
+        self,
+        job_id: str,
+        control_key: str,
+        target_framework_key: str,
+        target_control_ids: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Alias for enqueue_mapping_request for backward compatibility.
+
+        Previously this method directly started Step Functions.
+        Now it enqueues to SQS for durable processing.
+        """
+        return self.enqueue_mapping_request(
+            job_id, control_key, target_framework_key, target_control_ids
         )
 
     # =========================================================================
@@ -194,7 +278,9 @@ class AsyncMappingService:
             )
         return None
 
-    def validate_target_control_ids(self, target_control_ids: list) -> Optional[str]:
+    def validate_target_control_ids(
+        self, target_control_ids: List[Any]
+    ) -> Optional[str]:
         """
         Validate target_control_ids is a list of strings.
 
@@ -249,7 +335,10 @@ class AsyncMappingService:
             )
             if result.get("Items"):
                 sample_keys = [item["controlKey"] for item in result["Items"][:3]]
-                return False, f"Framework '{framework_key}' exists. Sample control keys: {sample_keys}"
+                return (
+                    False,
+                    f"Framework '{framework_key}' exists. Sample control keys: {sample_keys}",
+                )
 
         return False, None
 

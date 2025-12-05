@@ -28,6 +28,8 @@ Nexus is an AWS compliance control mapping pipeline that maps AWS service contro
 - **NexusEnrichmentAgentLambda/** - Control enrichment Step Functions task
 - **NexusReasoningAgentLambda/** - Mapping reasoning Step Functions task
 - **NexusJobUpdaterLambda/** - Job status updates after workflow completion
+- **NexusSqsTriggerLambda/** - SQS trigger that starts Step Functions from queue messages
+- **NexusDlqRedriveLambda/** - DLQ redrive utility for retry after bug fixes
 - **DefaultAPIEndpointHandlerLambda/** - Default/fallback API endpoint handler
 
 ## Refactoring Status
@@ -56,6 +58,9 @@ Breaking NexusMappingPipelineRepo into smaller libraries for CI/CD optimization.
 - [x] **NexusEnrichmentAgentLambda** - Enrichment agent (calls NexusStrandsAgentService /enrich)
 - [x] **NexusReasoningAgentLambda** - Reasoning agent (calls NexusStrandsAgentService /reason)
 - [x] **NexusJobUpdaterLambda** - Job updater (updates job status after workflow completion)
+- [x] **NexusSqsTriggerLambda** - SQS trigger Lambda (consumes queue, starts Step Functions)
+- [x] **NexusDlqRedriveLambda** - DLQ redrive Lambda (retry failed requests after fixes)
+- [x] **SQS Infrastructure** - MappingRequestQueue, MappingRequestDLQ, CloudWatch alarms
 
 ### Pending
 - [ ] **Align all Config files** - Review and standardize build system configuration across all packages (pending guidance on brazilpython vs no-op)
@@ -88,8 +93,11 @@ Nexus/
 ├── NexusEnrichmentAgentLambda/     # Enrichment Step Function task (complete)
 ├── NexusReasoningAgentLambda/      # Reasoning Step Function task (complete)
 ├── NexusJobUpdaterLambda/          # Job status updates (complete)
+├── NexusSqsTriggerLambda/          # SQS trigger for Step Functions (complete)
+├── NexusDlqRedriveLambda/          # DLQ redrive utility (complete)
 ├── DefaultAPIEndpointHandlerLambda/ # Default/fallback API handler
-└── design docs/                    # Architecture and design documentation
+├── design docs/                    # Architecture and design documentation
+└── claude-working-docs/            # Claude working markdown files
 
 # Legacy package moved out of monorepo:
 # /home/stvwhite/projects/NexusMappingPipelineRepo/
@@ -191,12 +199,20 @@ brazil-runtime-exec python script.py
 ## Architecture
 
 ```
-API Gateway -> Lambda handlers -> Step Functions -> ECS GPU Service
-                                      |
-                                      +-> enrichment_agent (Claude)
-                                      +-> reasoning_agent (Claude)
-                                      +-> job_updater
+API Gateway -> AsyncAPIHandler -> MappingRequestQueue -> SQS Trigger Lambda -> Step Functions
+                    |                    |                                          |
+                    v                    v (on failure)                             +-> ECS GPU Service
+              MappingJobs          MappingRequestDLQ                                +-> enrichment_agent (Claude)
+                (PENDING)               |                                           +-> reasoning_agent (Claude)
+                                        v (after fix)                               +-> job_updater
+                                  DLQ Redrive Lambda
+                                        |
+                                        v
+                                  MappingRequestQueue
 ```
+
+**SQS-based durability:** Requests are queued before Step Functions execution. If processing fails
+due to bugs requiring code fixes, requests are preserved in DLQ and can be retried after deployment.
 
 **Lambda pattern:** Each Lambda follows `handler.py` (entry) + `service.py` (logic) structure.
 
@@ -467,7 +483,7 @@ All Step Functions Lambdas have been migrated from NexusMappingPipelineRepo to i
 
 ### NexusAsyncAPIHandlerLambda
 **Package:** `NexusAsyncAPIHandlerLambda/`
-**Endpoint:** POST `/api/v1/mappings` (starts async mapping workflow)
+**Endpoint:** POST `/api/v1/mappings` (starts async mapping workflow via SQS)
 
 **Request Format:**
 ```json
@@ -490,18 +506,71 @@ All Step Functions Lambdas have been migrated from NexusMappingPipelineRepo to i
 ```
 
 **Key Functions:**
-- `create_job()` - Creates job record in Jobs table (PENDING status, 7-day TTL)
-- `start_workflow()` - Starts Step Functions execution, updates job to RUNNING
+- `create_job()` - Creates job record using Job DAO (PENDING status, 7-day TTL)
+- `enqueue_mapping_request()` - Publishes to MappingRequestQueue for durable processing
+- `start_workflow()` - Alias for enqueue_mapping_request (backward compatibility)
 - `validate_control_key_format()` - Pattern: `^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+#.+$`
 - `validate_framework_key_format()` - Pattern: `^[A-Za-z0-9._-]+#[A-Za-z0-9._-]+$`
 - `control_exists()` - Queries ControlKeyIndex GSI, returns suggestions if not found
 - `framework_exists()` - Queries Frameworks table, returns available frameworks if not found
 
 **Environment Variables:**
-- `JOB_TABLE_NAME` - Jobs DynamoDB table
-- `STATE_MACHINE_ARN` - Step Functions state machine ARN
+- `JOB_TABLE_NAME` - Jobs DynamoDB table (default: "MappingJobs")
+- `MAPPING_REQUEST_QUEUE_URL` - SQS queue URL for durable processing
 - `FRAMEWORKS_TABLE_NAME` - Frameworks table (default: "Frameworks")
 - `CONTROLS_TABLE_NAME` - Controls table (default: "FrameworkControls")
+
+**Dependencies:**
+- `NexusApplicationInterface` - Job model, JobStatus enum
+- `NexusApplicationCommons` - BaseRepository pattern
+
+### NexusSqsTriggerLambda
+**Package:** `NexusSqsTriggerLambda/`
+**Trigger:** SQS event source from MappingRequestQueue
+
+Consumes mapping requests from SQS and starts Step Functions workflows. Provides durability -
+if Step Functions fails due to bugs requiring code fixes, requests are preserved in DLQ.
+
+**Key Functions:**
+- `start_workflow()` - Starts Step Functions execution for each SQS message
+- `JobRepository.update_status()` - Updates job status to IN_PROGRESS
+
+**Environment Variables:**
+- `STATE_MACHINE_ARN` - Step Functions state machine ARN
+- `JOB_TABLE_NAME` - Jobs DynamoDB table (default: "MappingJobs")
+
+**SQS Configuration:**
+- Batch size: 1 (process one message at a time)
+- Partial batch failure reporting enabled
+- Max receive count: 3 (then moves to DLQ)
+
+### NexusDlqRedriveLambda
+**Package:** `NexusDlqRedriveLambda/`
+**Invocation:** Manual or scheduled
+
+Redrives failed messages from MappingRequestDLQ back to MappingRequestQueue after bug fixes.
+
+**Request Format:**
+```json
+{
+  "dry_run": true,        // Optional: just count messages
+  "max_messages": 50      // Optional: limit messages to redrive
+}
+```
+
+**Response:**
+```json
+{
+  "statusCode": 200,
+  "messages_redriven": 25,
+  "dlq_message_count_before": 30,
+  "message": "Successfully redriven 25 messages"
+}
+```
+
+**Environment Variables:**
+- `DLQ_URL` - MappingRequestDLQ URL
+- `MAIN_QUEUE_URL` - MappingRequestQueue URL
 
 ### NexusStatusAPIHandlerLambda
 **Package:** `NexusStatusAPIHandlerLambda/`
@@ -542,6 +611,33 @@ Start → ValidateControl → CheckEnrichment → [RunEnrichment] → ScienceMod
                                                                     ↓
                                                               OnError → JobUpdater(FAILED)
 ```
+
+## SQS Infrastructure
+
+### MappingRequestQueue
+**Type:** Standard SQS Queue
+**Purpose:** Durable buffer for async mapping requests
+
+| Property | Value |
+|----------|-------|
+| Visibility Timeout | 60 seconds |
+| Message Retention | 7 days |
+| Max Receive Count | 3 (then DLQ) |
+| Encryption | AWS managed |
+
+### MappingRequestDLQ
+**Type:** Standard SQS Queue (Dead Letter Queue)
+**Purpose:** Stores failed messages for retry after bug fixes
+
+| Property | Value |
+|----------|-------|
+| Message Retention | 14 days |
+| Encryption | AWS managed |
+
+### CloudWatch Alarms
+- **DLQ Not Empty:** Triggers when messages appear in DLQ (indicates failures)
+- **Queue Backlog:** Triggers when ApproximateNumberOfMessagesVisible > 100
+- **Message Age:** Triggers when ApproximateAgeOfOldestMessage > 1 hour
 
 ## Document Generation Best Practices
 
@@ -616,9 +712,17 @@ date: "December 2024"
 
 ### Design Docs Location
 All design documentation is stored in: `design docs/`
+
+**Distribution Files (docx):**
 - `Nexus - High Level Design Doc (Revision 4).docx` - HLD reference
 - `Nexus - Database Schema.docx` - Database schema reference
 - `Nexus - Package Architecture and Pipeline Guide.docx` - Package architecture (generated)
 - `Nexus - Mapping API Architecture.docx` - Mapping API flow through all packages (generated)
-- `Nexus - Package Summary Guide.docx` - Comprehensive summary of all 20 packages (generated)
+- `Nexus - Package Summary Guide.docx` - Comprehensive summary of all 22 packages (generated)
 - `Nexus - Enrichment Agent Migration Analysis.docx` - Comparison of GPU server enrichment_sim_v2 vs NexusEnrichmentAgent package (generated)
+
+**Markdown Source Files:** `design docs/claude-working-docs/`
+- `Nexus - Package Architecture and Pipeline Guide.md`
+- `Nexus-Mapping-API-Architecture.md`
+- `Nexus - Package Summary Guide.md`
+- `Nexus - Enrichment Agent Migration Analysis.md`

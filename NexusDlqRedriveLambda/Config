@@ -1,4 +1,4 @@
-package.NexusAsyncAPIHandlerLambda = {
+package.NexusDlqRedriveLambda = {
     interfaces = (1.0);
 
     # Use NoOpBuild. See https://w.amazon.com/index.php/BrazilBuildSystem/NoOpBuild
@@ -15,15 +15,11 @@ package.NexusAsyncAPIHandlerLambda = {
     # be exported to other packages that build against you.
     dependencies = {
         1.0 = {
-            NexusApplicationInterface = 1.0;
-            NexusApplicationCommons = 1.0;
         };
     };
 
     runtime-dependencies = {
         1.0 = {
-            NexusApplicationInterface = 1.0;
-            NexusApplicationCommons = 1.0;
         };
     };
 

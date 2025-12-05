@@ -18,7 +18,9 @@ import { ComputeEnvironment, PIPELINE_STAGE_CONFIGS } from './pipelineStage';
 import { AppConfigStack } from '../stacks/appconfig/app-config-stack';
 import { VpcDeploymentStack } from '../stacks/vpc-deployment-stack';
 import { DynamodbStack } from '../stacks/dynamodb/dynamodb-stack';
+import { MappingRequestQueueStack } from '../stacks/sqs/mapping-request-queue-stack';
 import { SERVICE_NAME } from '../utils/constants';
+import { SqsStackProps } from '../props/SqsStackProps';
 import { DashboardStack } from '../stacks/dashboard/dashboard-stack';
 import { ApiEndpointHandlerLambdaStack } from '../stacks/apihandlers/api-endpoint-handler-lambda-stack';
 
@@ -123,7 +125,18 @@ export class PipelineInfrastructure {
 
         const vpcStack = this.createVPCStack(app, deploymentEnvironment, computeEnvironment);
 
+        // Create SQS stack for mapping request queue and DLQ
+        // This must be created before API handler to pass the queue URL
+        const mappingRequestQueueStack = this.createSqsStack(
+          app,
+          deploymentEnvironment,
+          computeEnvironment,
+          pipelineStageConfig.isProd,
+          vpcStack,
+        );
+
         // Create deployment stack for api endpoint handler.
+        // Pass the SQS queue for async mapping requests
         const apiEndpointLambdaStack = this.createAPIEndpointHandlerStack(
           app,
           computeEnvironment,
@@ -131,6 +144,7 @@ export class PipelineInfrastructure {
           pipelineStageConfig.isProd,
           approvalSteps,
           vpcStack,
+          mappingRequestQueueStack,
         );
 
         const frameworksTable = this.createDynamoDbStack(
@@ -331,6 +345,44 @@ export class PipelineInfrastructure {
           ],
         );
 
+        // MappingJobs table for async mapping workflow job tracking
+        const mappingJobsTable = this.createDynamoDbStack(
+          app,
+          deploymentEnvironment,
+          computeEnvironment,
+          pipelineStageConfig.isProd,
+          'MappingJobs',
+          'job_id',
+          '', // No sort key - single job_id primary key
+          [],
+          [
+            {
+              indexName: 'StatusIndex',
+              partitionKey: {
+                name: 'status',
+                type: dynamodb.AttributeType.STRING,
+              },
+              sortKey: {
+                name: 'created_at',
+                type: dynamodb.AttributeType.STRING,
+              },
+              projectionType: ProjectionType.ALL,
+            },
+            {
+              indexName: 'ControlKeyIndex',
+              partitionKey: {
+                name: 'control_key',
+                type: dynamodb.AttributeType.STRING,
+              },
+              sortKey: {
+                name: 'created_at',
+                type: dynamodb.AttributeType.STRING,
+              },
+              projectionType: ProjectionType.ALL,
+            },
+          ],
+        );
+
         const appConfigStack = new AppConfigStack(
           app,
           `AppConfig-${this.generateComputeEnvironmentIdentifier(computeEnvironment)}`,
@@ -363,6 +415,7 @@ export class PipelineInfrastructure {
           stacks: [
             appConfigStack,
             vpcStack,
+            mappingRequestQueueStack,
             apiEndpointLambdaStack,
             frameworksTable,
             frameworkControlsTable,
@@ -370,6 +423,7 @@ export class PipelineInfrastructure {
             controlGuideIndex,
             mappingReviewsTable,
             mappingFeedbackTable,
+            mappingJobsTable,
             dashboardStack,
           ],
         });
@@ -461,6 +515,7 @@ export class PipelineInfrastructure {
     isProd: boolean,
     approvalSteps: Array<ApprovalWorkflowStep>,
     vpcStack: VpcDeploymentStack,
+    mappingRequestQueueStack?: MappingRequestQueueStack,
   ) {
     const apiEndpointHandlerLambdaStackName = `APIEndpointHandler-${this.generateComputeEnvironmentIdentifier(computeEnvironment)}`;
 
@@ -471,16 +526,44 @@ export class PipelineInfrastructure {
       awsRegion: computeEnvironment.AWSRegion,
       isProd: isProd,
       vpc: vpcStack.vpc,
+      mappingRequestQueue: mappingRequestQueueStack?.mappingRequestQueue,
     });
 
-    // TODO: Temporarily disable integration tests.
-    // approvalSteps.push(
-    //   apiEndpointLambdaStack.createIntegrationTestsApprovalWorkflowStep(
-    //     `APIEndpointHandler-Integration Tests - ${computeEnvironment.region}`,
-    //     VERSION_SET_PLATFORM,
-    //   ),
-    // );
-
     return apiEndpointLambdaStack;
+  }
+
+  /**
+   * Helper method to create SQS stack for mapping request queue and DLQ.
+   *
+   * @param app
+   * @param deploymentEnvironment
+   * @param computeEnvironment
+   * @param isProd
+   * @param vpcStack
+   * @param stateMachineArn
+   * @private
+   */
+  private createSqsStack(
+    app: App,
+    deploymentEnvironment: DeploymentEnvironment,
+    computeEnvironment: ComputeEnvironment,
+    isProd: boolean,
+    vpcStack: VpcDeploymentStack,
+    stateMachineArn?: string,
+  ) {
+    return new MappingRequestQueueStack(
+      app,
+      `MappingRequestQueue-${this.generateComputeEnvironmentIdentifier(computeEnvironment)}`,
+      {
+        env: deploymentEnvironment,
+        stage: computeEnvironment.stage,
+        region: computeEnvironment.region,
+        awsRegion: computeEnvironment.AWSRegion,
+        isProd: isProd,
+        accountId: computeEnvironment.accountId,
+        vpc: vpcStack.vpc,
+        stateMachineArn: stateMachineArn,
+      },
+    );
   }
 }

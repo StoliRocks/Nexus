@@ -1,7 +1,7 @@
 import { DeploymentStack, SoftwareType } from '@amzn/pipelines';
 import { Construct } from 'constructs';
 import { DynamoDBStackProps } from '../../props/DynamoDBStackProps';
-import { RemovalPolicy } from 'aws-cdk-lib';
+import { RemovalPolicy, Tags } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { ArnPrincipal, Effect, PolicyDocument, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 
@@ -14,6 +14,13 @@ export class DynamodbStack extends DeploymentStack {
       softwareType: SoftwareType.INFRASTRUCTURE,
     });
 
+    // Add stack tags for cost tracking and ownership
+    Tags.of(this).add('Service', 'Nexus');
+    Tags.of(this).add('Team', 'nexus-eng');
+    Tags.of(this).add('Stage', props.stage);
+    Tags.of(this).add('CostCenter', 'nexus-database');
+    Tags.of(this).add('Owner', 'nexus-eng@amazon.com');
+
     // Create the Document Ingestion Status table
     let tableProps: dynamodb.TableProps = {
       tableName: props.tableName,
@@ -24,7 +31,7 @@ export class DynamodbStack extends DeploymentStack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: 'expiryTime',
       encryption: dynamodb.TableEncryption.DEFAULT,
-      removalPolicy: props.isProd ? RemovalPolicy.DESTROY : RemovalPolicy.RETAIN,
+      removalPolicy: props.isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
       deletionProtection: true,
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: true,

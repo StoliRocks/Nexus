@@ -22,7 +22,7 @@ This document provides a comprehensive summary of all packages in the Nexus comp
 
 ## Overview
 
-Nexus is an AWS compliance control mapping pipeline that maps AWS service controls to industry compliance frameworks (NIST, SOC2, PCI-DSS). The system comprises **20 packages** organized into distinct categories:
+Nexus is an AWS compliance control mapping pipeline that maps AWS service controls to industry compliance frameworks (NIST, SOC2, PCI-DSS). The system comprises **22 packages** organized into distinct categories:
 
 | Category | Count | Description |
 |----------|-------|-------------|
@@ -30,6 +30,7 @@ Nexus is an AWS compliance control mapping pipeline that maps AWS service contro
 | Agent Libraries | 2 | Multi-agent enrichment and reasoning |
 | CRUD Lambda Handlers | 5 | API operations for resources |
 | Async Workflow Lambda Handlers | 2 | Job creation and status |
+| SQS Processing Lambda Handlers | 2 | Durable queue processing and DLQ redrive |
 | Step Functions Task Lambda Handlers | 4 | Workflow task execution |
 | Authorization Lambda | 1 | API Gateway authorizer |
 | ECS Services | 2 | ML inference and agent execution |
@@ -60,6 +61,10 @@ Nexus/
 ├── Lambda Handlers - Async Workflow
 │   ├── NexusAsyncAPIHandlerLambda/
 │   └── NexusStatusAPIHandlerLambda/
+│
+├── Lambda Handlers - SQS Processing
+│   ├── NexusSqsTriggerLambda/          # SQS → Step Functions
+│   └── NexusDlqRedriveLambda/          # DLQ message redrive
 │
 ├── Lambda Handlers - Step Functions Tasks
 │   ├── NexusScienceOrchestratorLambda/
@@ -452,6 +457,114 @@ PENDING → RUNNING → COMPLETED / FAILED
 
 ---
 
+## Lambda Handlers - SQS Processing
+
+These Lambda handlers provide durable message processing for the async mapping workflow.
+
+### NexusSqsTriggerLambda
+
+| Attribute | Value |
+|-----------|-------|
+| **Location** | `NexusSqsTriggerLambda/` |
+| **Purpose** | Consume SQS messages and start Step Functions workflows |
+| **DynamoDB Table** | MappingJobs |
+| **SQS Queue** | MappingRequestQueue |
+| **Entry Point** | `lambda_handler` |
+
+**Trigger:** SQS event source mapping (batch size: 10)
+
+**Process:**
+1. Receives batch of SQS messages from MappingRequestQueue
+2. For each message, starts Step Functions workflow
+3. Updates job status from PENDING to RUNNING
+4. Returns partial batch failure report for failed messages
+
+**Message Format:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "control_key": "AWS.ControlCatalog#1.0#API_GW_CACHE_ENABLED",
+  "target_framework_key": "NIST-SP-800-53#R5",
+  "target_control_ids": ["AC-1", "AC-2"]
+}
+```
+
+**Key Functions:**
+
+| Function | Description |
+|----------|-------------|
+| `process_message()` | Parse message, start workflow, update job |
+| `start_workflow()` | Start Step Functions execution |
+| `update_job_status()` | Transition job from PENDING to RUNNING |
+
+**Environment Variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `JOB_TABLE_NAME` | MappingJobs DynamoDB table |
+| `STATE_MACHINE_ARN` | Step Functions state machine ARN |
+
+**Failure Handling:**
+- Failed messages reported via `batchItemFailures` response
+- SQS automatically retries failed messages (3 attempts)
+- After max retries, messages move to Dead Letter Queue
+
+---
+
+### NexusDlqRedriveLambda
+
+| Attribute | Value |
+|-----------|-------|
+| **Location** | `NexusDlqRedriveLambda/` |
+| **Purpose** | Redrive failed messages from DLQ after bug fixes |
+| **SQS Queues** | MappingRequestDLQ (source), MappingRequestQueue (target) |
+| **Entry Point** | `lambda_handler` |
+
+**Trigger:** Manual invocation or CloudWatch Events schedule
+
+**Request (Optional Parameters):**
+```json
+{
+  "dry_run": false,
+  "max_messages": 100
+}
+```
+
+**Response:**
+```json
+{
+  "statusCode": 200,
+  "body": {
+    "messages_processed": 50,
+    "messages_redriven": 48,
+    "messages_failed": 2,
+    "dry_run": false
+  }
+}
+```
+
+**Key Functions:**
+
+| Function | Description |
+|----------|-------------|
+| `receive_dlq_messages()` | Poll messages from DLQ |
+| `redrive_message()` | Send message to main queue |
+| `delete_message()` | Remove from DLQ after successful redrive |
+
+**Environment Variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `DLQ_URL` | MappingRequestDLQ URL |
+| `MAIN_QUEUE_URL` | MappingRequestQueue URL |
+
+**Use Case:**
+- After deploying bug fix, trigger this Lambda to reprocess failed requests
+- Use `dry_run: true` to preview which messages would be redriven
+- Use `max_messages` to limit batch size for controlled reprocessing
+
+---
+
 ## Lambda Handlers - Step Functions Tasks
 
 ### NexusScienceOrchestratorLambda
@@ -740,11 +853,21 @@ npx cdk deploy
                     │                         │                         │
                     ▼                         ▼                         ▼
         ┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
-        │ Enrichment Lambda │     │  Reasoning Lambda │     │ Async/Status      │
-        │ (Step Function)   │     │  (Step Function)  │     │ Lambda Handlers   │
-        └───────────────────┘     └───────────────────┘     └───────────────────┘
-                    │                         │                         │
-                    └─────────────────────────┼─────────────────────────┘
+        │ Enrichment Lambda │     │  Reasoning Lambda │     │ Async Handler     │
+        │ (Step Function)   │     │  (Step Function)  │     │ (publishes SQS)   │
+        └───────────────────┘     └───────────────────┘     └─────────┬─────────┘
+                    │                         │                       │
+                    └─────────────────────────┼───────────────────────┘
+                                              │
+                           ┌──────────────────▼──────────────────┐
+                           │      MappingRequestQueue (SQS)      │
+                           │         (durability layer)          │
+                           └──────────────────┬──────────────────┘
+                                              │
+                           ┌──────────────────▼──────────────────┐
+                           │       NexusSqsTriggerLambda         │
+                           │    (consumes SQS, starts workflow)  │
+                           └──────────────────┬──────────────────┘
                                               │
                            ┌──────────────────▼──────────────────┐
                            │     NexusScienceOrchestrator        │
@@ -760,6 +883,21 @@ npx cdk deploy
                            │    NexusApplicationPipelineCDK      │
                            │   (orchestrates all deployments)    │
                            └─────────────────────────────────────┘
+
+                    ┌─────────────────────────────────────────────┐
+                    │            SQS Failure Path                 │
+                    │                                             │
+                    │  MappingRequestQueue (3 retries)            │
+                    │           │                                 │
+                    │           ▼                                 │
+                    │  MappingRequestDLQ (failed messages)        │
+                    │           │                                 │
+                    │           ▼                                 │
+                    │  NexusDlqRedriveLambda (manual redrive)     │
+                    │           │                                 │
+                    │           ▼                                 │
+                    │  MappingRequestQueue (reprocessed)          │
+                    └─────────────────────────────────────────────┘
 ```
 
 ---
@@ -858,10 +996,22 @@ class XxxService:
 ### Step Functions Workflow
 
 ```
-Start → ValidateControl → CheckEnrichment → [RunEnrichment] →
-ScienceOrchestrator → Map(Reasoning) → JobUpdater → End
-
-OnError → JobUpdater(FAILED)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SQS Durability Layer                                  │
+│                                                                             │
+│  API Gateway → AsyncHandler → SQS Queue → SqsTriggerLambda                  │
+│                  (PENDING)      (durable)    (RUNNING)                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Step Functions Workflow                               │
+│                                                                             │
+│  Start → ValidateControl → CheckEnrichment → [RunEnrichment] →              │
+│  ScienceOrchestrator → Map(Reasoning) → JobUpdater → End                    │
+│                                                                             │
+│  OnError → JobUpdater(FAILED)                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---

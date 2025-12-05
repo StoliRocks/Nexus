@@ -5,11 +5,13 @@ AWS compliance control mapping pipeline that maps AWS service controls to indust
 ## Architecture
 
 ```
-API Gateway → Lambda Handlers → Step Functions → ECS GPU Service
-                                     │
-                                     ├── Enrichment Agent (Claude)
-                                     ├── Reasoning Agent (Claude)
-                                     └── Job Updater
+API Gateway → Lambda Handlers → SQS Queue → Step Functions → ECS GPU Service
+                                   │              │
+                                   │              ├── Enrichment Agent (Claude)
+                                   │              ├── Reasoning Agent (Claude)
+                                   │              └── Job Updater
+                                   │
+                                   └── DLQ (failed messages) → Redrive Lambda
 ```
 
 ## Key Features
@@ -18,6 +20,7 @@ API Gateway → Lambda Handlers → Step Functions → ECS GPU Service
 - **GPU-Accelerated ML**: Qwen-embedding-8B for 4096-dim embeddings, ModernBERT cross-encoder for reranking
 - **Multi-Agent Enrichment**: Strands-based agents for control interpretation and context enrichment
 - **Reasoning Generation**: LLM-powered explanations for why controls map to framework requirements
+- **Durable Request Processing**: SQS-based ingestion with DLQ for failed message recovery
 
 ## Monorepo Structure
 
@@ -41,6 +44,8 @@ API Gateway → Lambda Handlers → Step Functions → ECS GPU Service
 | `NexusEnrichmentAgentLambda` | Enrichment Step Functions task |
 | `NexusReasoningAgentLambda` | Reasoning Step Functions task |
 | `NexusJobUpdaterLambda` | Job status updates |
+| `NexusSqsTriggerLambda` | SQS consumer, starts Step Functions |
+| `NexusDlqRedriveLambda` | DLQ message redrive utility |
 | `NexusLambdaAuthorizer` | API Gateway custom authorizer |
 | `DefaultAPIEndpointHandlerLambda` | Default/fallback API handler |
 | `design docs/` | Architecture and design documentation |
@@ -99,9 +104,12 @@ npx cdk synth
 - `controlKey`: `frameworkKey#controlId` (e.g., `NIST-SP-800-53#R5#AC-1`)
 - `mappingKey`: `controlKey1|controlKey2` (sorted concatenation)
 
-**Step Functions Workflow:**
+**Async Mapping Flow:**
 ```
-Start → ValidateControl → CheckEnrichment → [RunEnrichment] → ScienceModel → Map(Reasoning) → JobUpdater → End
+POST /mappings → AsyncHandler → SQS Queue → SqsTriggerLambda → Step Functions
+                  (PENDING)      (durable)      (RUNNING)
+
+Step Functions: ValidateControl → CheckEnrichment → [RunEnrichment] → ScienceModel → Map(Reasoning) → JobUpdater → End
 ```
 
 ## Deployment Environments
