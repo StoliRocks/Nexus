@@ -14,19 +14,21 @@ Nexus is an AWS compliance control mapping pipeline that maps AWS service contro
 - **NexusEnrichmentAgent/** - Multi-agent enrichment system using strands
 - **NexusReasoningAgent/** - Reasoning generator for mapping rationale
 - **NexusApplicationPipelineCDK/** - TypeScript CDK infrastructure (API Gateway, Lambda handlers, DynamoDB)
+- **NexusECSService/** - GPU ML inference service (Qwen embeddings, ModernBERT reranker)
+- **NexusStrandsAgentService/** - ECS service for strands-based agent execution (enrichment + reasoning)
 - **NexusFrameworkAPIHandlerLambda/** - Framework CRUD operations
 - **NexusControlAPIHandlerLambda/** - Control CRUD operations
 - **NexusMappingAPIHandlerLambda/** - Mapping CRUD operations
 - **NexusMappingReviewAPIHandlerLambda/** - Review operations for mappings
 - **NexusMappingFeedbackAPIHandlerLambda/** - Feedback (thumbs up/down) operations
 - **NexusLambdaAuthorizer/** - API Gateway custom authorizer
-- **NexusStrandsAgentService/** - ECS service for strands-based agent execution (enrichment + reasoning)
 - **NexusAsyncAPIHandlerLambda/** - Async job creation (POST /mappings - starts Step Functions)
 - **NexusStatusAPIHandlerLambda/** - Job status queries (GET /mappings/{mappingId})
 - **NexusScienceOrchestratorLambda/** - ML pipeline orchestration (embed → retrieve → rerank)
 - **NexusEnrichmentAgentLambda/** - Control enrichment Step Functions task
 - **NexusReasoningAgentLambda/** - Mapping reasoning Step Functions task
 - **NexusJobUpdaterLambda/** - Job status updates after workflow completion
+- **DefaultAPIEndpointHandlerLambda/** - Default/fallback API endpoint handler
 
 ## Refactoring Status
 
@@ -85,7 +87,9 @@ Nexus/
 ├── NexusScienceOrchestratorLambda/ # ML pipeline orchestration (complete)
 ├── NexusEnrichmentAgentLambda/     # Enrichment Step Function task (complete)
 ├── NexusReasoningAgentLambda/      # Reasoning Step Function task (complete)
-└── NexusJobUpdaterLambda/          # Job status updates (complete)
+├── NexusJobUpdaterLambda/          # Job status updates (complete)
+├── DefaultAPIEndpointHandlerLambda/ # Default/fallback API handler
+└── design docs/                    # Architecture and design documentation
 
 # Legacy package moved out of monorepo:
 # /home/stvwhite/projects/NexusMappingPipelineRepo/
